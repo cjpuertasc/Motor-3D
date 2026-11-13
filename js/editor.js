@@ -3803,10 +3803,103 @@
         if (e.key === "Enter") { e.preventDefault(); confirmExport(); }
     });
 
+    function parseOBJ(text) {
+    const vertices = [];
+    const faces = [];
+
+    for (const rawLine of text.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("#")) continue;
+
+        const parts = line.split(/\s+/);
+
+        if (parts[0] === "v") {
+            if (parts.length < 4) continue;
+
+            const vertex = parts.slice(1, 4).map(Number);
+            if (!vertex.every(Number.isFinite)) {
+                throw new Error("El OBJ contiene un vértice inválido");
+            }
+            vertices.push(vertex);
+            continue;
+        }
+
+        if (parts[0] === "f") {
+            const face = parts.slice(1).map(token => {
+                const rawIndex = Number.parseInt(token.split("/")[0], 10);
+                if (!Number.isInteger(rawIndex) || rawIndex === 0) {
+                    throw new Error("El OBJ contiene un índice de cara inválido");
+                }
+
+                // OBJ usa índices positivos desde 1 y negativos
+                // relativos al último vértice declarado.
+                const index = rawIndex > 0
+                    ? rawIndex - 1
+                    : vertices.length + rawIndex;
+
+                if (index < 0 || index >= vertices.length) {
+                    throw new Error("El OBJ referencia un vértice inexistente");
+                }
+                return index;
+            });
+
+            if (face.length >= 3) faces.push(face);
+        }
+    }
+
+    if (vertices.length === 0 || faces.length === 0) {
+        throw new Error("El OBJ no contiene vértices y caras válidos");
+    }
+
+    return {
+        vertices,
+        faces,
+        color: [0.62, 0.65, 0.75],
+        version: 0,
+        edgeMidpoints: new Map()
+    };
+}
+
     $("fileInput").addEventListener("change", async event => {
         const file = event.target.files[0];
         if (!file) return;
         try {
+            if (/\.obj$/i.test(file.name)) {
+            const mesh = parseOBJ(await file.text());
+            pushHistory();
+
+            const id = nextId++;
+            const object = {
+                id,
+                name: file.name.replace(/\.obj$/i, "") || "Importado",
+                type: "OBJ",
+                mesh,
+                position: [0, 0, 0],
+                rotation: [0, 0, 0],
+                scale: [1, 1, 1],
+                pivot: meshCenter(mesh),
+                color: [...mesh.color],
+                visible: true,
+                groupId: null
+            };
+
+            // Se añade a la escena; no reemplaza los objetos existentes.
+            objects.push(object);
+            selectedIds = new Set([id]);
+            selectedId = id;
+            selectedGroupId = null;
+
+            updateOutliner();
+            updateProperties();
+            updateToolOptions();
+            refreshToolsGrid();
+            $("selectionInfo").textContent = object.name;
+            render();
+            setStatus("OBJ importado: " + object.name);
+            event.target.value = "";
+            return;
+            }
+
             const data = JSON.parse(await file.text());
             if (data.format !== "MODEL_LAB" || !Array.isArray(data.objects)) {
                 throw new Error("Archivo incompatible");
@@ -3817,9 +3910,18 @@
             if (data.modelOptions) Object.assign(modelOptions, data.modelOptions);
 
             const loadedObjects = data.objects.map(raw => {
-                if (!Geometry[raw.type]) throw new Error("Geometría desconocida");
+                const hasSavedMesh =
+                    raw.mesh &&
+                    Array.isArray(raw.mesh.vertices) &&
+                    Array.isArray(raw.mesh.faces);
+
+                if (!hasSavedMesh && !Geometry[raw.type]) {
+                    throw new Error("Geometría desconocida: " + String(raw.type));
+                }
+
                 let mesh;
-                if (raw.mesh && Array.isArray(raw.mesh.vertices) && Array.isArray(raw.mesh.faces)) {
+
+                if (hasSavedMesh) {
                     mesh = {
                         vertices: raw.mesh.vertices.map(v => [v[0], v[1], v[2]]),
                         faces: raw.mesh.faces.map(f => f.slice()),
@@ -3827,9 +3929,13 @@
                         version: 0,
                         edgeMidpoints: new Map()
                     };
-                } else mesh = Geometry[raw.type]();
+                } else {
+                    mesh = Geometry[raw.type]();
+                }
+
                 return {
-                    ...raw, mesh,
+                    ...raw,
+                    mesh,
                     position: raw.position || [0, 0, 0],
                     rotation: raw.rotation || [0, 0, 0],
                     scale: raw.scale || [1, 1, 1],
